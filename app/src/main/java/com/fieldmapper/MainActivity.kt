@@ -10,13 +10,17 @@ import android.util.Log
 import android.view.Gravity
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.Switch
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.fieldmapper.ar.ArSessionManager
 import com.fieldmapper.fieldmap.FieldLineTracer
+import com.fieldmapper.fieldmap.PlanarGrid
 import com.fieldmapper.fieldmap.SampleStore
+import com.fieldmapper.render.ArrowRenderer
 import com.fieldmapper.render.BackgroundRenderer
 import com.fieldmapper.render.FieldLineRenderer
 import com.fieldmapper.sensor.MagnetometerReader
@@ -39,6 +43,8 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private lateinit var fieldLineTracer: FieldLineTracer
     private lateinit var backgroundRenderer: BackgroundRenderer
     private lateinit var fieldLineRenderer: FieldLineRenderer
+    private lateinit var arrowRenderer: ArrowRenderer
+    private val planarGrid = PlanarGrid()
 
     private val recomputeScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var lastRecomputeSampleCount = 0
@@ -48,6 +54,8 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
     private var lastSamplePosition: FloatArray? = null
     private var frameCount = 0
     private var lastStatusUpdate = 0L
+    @Volatile private var subtractAverage = false
+    @Volatile private var planarMode = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -96,9 +104,47 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             text = "Starting..."
         }
 
+        @Suppress("UseSwitchCompatOrMaterialCode")
+        val subtractSwitch = Switch(this).apply {
+            text = "Subtract Earth field"
+            setTextColor(Color.WHITE)
+            setShadowLayer(2f, 1f, 1f, Color.BLACK)
+            textSize = 14f
+            setPadding(24, 8, 24, 8)
+            setOnCheckedChangeListener { _, isChecked ->
+                subtractAverage = isChecked
+                forceRecompute()
+            }
+        }
+
+        @Suppress("UseSwitchCompatOrMaterialCode")
+        val planarSwitch = Switch(this).apply {
+            text = "Planar view"
+            setTextColor(Color.WHITE)
+            setShadowLayer(2f, 1f, 1f, Color.BLACK)
+            textSize = 14f
+            setPadding(24, 8, 24, 8)
+            setOnCheckedChangeListener { _, isChecked ->
+                planarMode = isChecked
+                if (isChecked) {
+                    // Lock plane at current phone height on next frame
+                    planarGrid.reset()
+                } else {
+                    planarGrid.reset()
+                }
+            }
+        }
+
+        val overlay = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(statusText)
+            addView(subtractSwitch)
+            addView(planarSwitch)
+        }
+
         val layout = FrameLayout(this)
         layout.addView(glSurfaceView)
-        layout.addView(statusText, FrameLayout.LayoutParams(
+        layout.addView(overlay, FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT,
             Gravity.TOP or Gravity.START
@@ -115,6 +161,8 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         magnetometer = MagnetometerReader(this)
         backgroundRenderer = BackgroundRenderer(this)
         fieldLineRenderer = FieldLineRenderer(this)
+
+        arrowRenderer = ArrowRenderer(this)
 
         arSession.setupSession(backgroundRenderer.cameraTextureId)
         magnetometer.start()
@@ -156,40 +204,95 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             val rotation = frameData.cameraRotation
             val worldField = magnetometer.getWorldFieldVector(rotation)
 
-            if (worldField != null && shouldCollectSample(position)) {
-                sampleStore.addSample(position.copyOf(), worldField)
-                lastSamplePosition = position.copyOf()
-                Log.d(TAG, "Sample #${sampleStore.sampleCount}: " +
-                    "pos=(%.2f, %.2f, %.2f) ".format(position[0], position[1], position[2]) +
-                    "B=(%.1f, %.1f, %.1f) uT".format(worldField[0], worldField[1], worldField[2]))
-            }
-
-            // Trigger field line recomputation if enough new data
-            maybeRecomputeFieldLines()
-
-            // Render field lines
-            val lines = fieldLineTracer.currentLines
-            fieldLineRenderer.draw(lines, frameData.viewProjectionMatrix)
-
-            // Update status overlay (~2 times per second)
-            if (now - lastStatusUpdate > 500) {
-                lastStatusUpdate = now
-                val samples = sampleStore.sampleCount
-                val lineCount = lines.size
-                val totalPts = lines.sumOf { it.points.size }
-                val magStr = if (worldField != null) {
-                    val mag = kotlin.math.sqrt(worldField[0]*worldField[0] + worldField[1]*worldField[1] + worldField[2]*worldField[2])
-                    "%.0f uT".format(mag)
-                } else "no reading"
-                val pos = "%.2f, %.2f, %.2f".format(position[0], position[1], position[2])
-                val status = "Tracking | Pos: ($pos)\n" +
-                    "Samples: $samples | |B|: $magStr\n" +
-                    "Lines: $lineCount ($totalPts pts)" +
-                    if (isRecomputing) " [computing...]" else ""
-                runOnUiThread { statusText.text = status }
+            if (planarMode) {
+                drawPlanarMode(position, worldField, frameData.viewProjectionMatrix, now)
+            } else {
+                drawFieldLineMode(position, worldField, frameData.viewProjectionMatrix, now)
             }
         } catch (e: Exception) {
             Log.e(TAG, "onDrawFrame error", e)
+        }
+    }
+
+    private fun drawFieldLineMode(
+        position: FloatArray, worldField: FloatArray?,
+        viewProjectionMatrix: FloatArray, now: Long
+    ) {
+        if (worldField != null && shouldCollectSample(position)) {
+            sampleStore.addSample(position.copyOf(), worldField)
+            lastSamplePosition = position.copyOf()
+            Log.d(TAG, "Sample #${sampleStore.sampleCount}: " +
+                "pos=(%.2f, %.2f, %.2f) ".format(position[0], position[1], position[2]) +
+                "B=(%.1f, %.1f, %.1f) uT".format(worldField[0], worldField[1], worldField[2]))
+        }
+
+        maybeRecomputeFieldLines()
+
+        val lines = fieldLineTracer.currentLines
+        fieldLineRenderer.draw(lines, viewProjectionMatrix)
+
+        if (now - lastStatusUpdate > 500) {
+            lastStatusUpdate = now
+            val samples = sampleStore.sampleCount
+            val lineCount = lines.size
+            val totalPts = lines.sumOf { it.points.size }
+            val magStr = if (worldField != null) {
+                val mag = kotlin.math.sqrt(worldField[0]*worldField[0] + worldField[1]*worldField[1] + worldField[2]*worldField[2])
+                "%.0f uT".format(mag)
+            } else "no reading"
+            val pos = "%.2f, %.2f, %.2f".format(position[0], position[1], position[2])
+            val mode = if (subtractAverage) "Local field" else "Total field"
+            val status = "$mode | Pos: ($pos)\n" +
+                "Samples: $samples | |B|: $magStr\n" +
+                "Lines: $lineCount ($totalPts pts)" +
+                if (isRecomputing) " [computing...]" else ""
+            runOnUiThread { statusText.text = status }
+        }
+    }
+
+    private fun drawPlanarMode(
+        position: FloatArray, worldField: FloatArray?,
+        viewProjectionMatrix: FloatArray, now: Long
+    ) {
+        // Lock the plane height on first tracked frame in planar mode
+        if (planarGrid.filledCount == 0 && worldField != null) {
+            planarGrid.lockPlane(position[1])
+            Log.d(TAG, "Planar mode: locked Y=%.2f".format(position[1]))
+        }
+
+        // Feed measurement to the grid
+        if (worldField != null) {
+            val bias = if (subtractAverage) sampleStore.getAverageField() else floatArrayOf(0f, 0f, 0f)
+            planarGrid.addMeasurement(position, worldField, bias)
+
+            // Also store in sampleStore so average keeps updating
+            if (shouldCollectSample(position)) {
+                sampleStore.addSample(position.copyOf(), worldField)
+                lastSamplePosition = position.copyOf()
+            }
+        }
+
+        // Render arrows and empty cell markers
+        val arrows = planarGrid.getArrows()
+        val emptyCells = planarGrid.getEmptyCellCenters()
+        arrowRenderer.draw(arrows, emptyCells, viewProjectionMatrix)
+
+        if (now - lastStatusUpdate > 500) {
+            lastStatusUpdate = now
+            val dy = position[1] - planarGrid.planeY
+            val inPlane = kotlin.math.abs(dy) <= PlanarGrid.HALF_HEIGHT
+            val planeStatus = if (inPlane) "IN plane" else "%.0fcm %s plane".format(
+                kotlin.math.abs(dy) * 100,
+                if (dy > 0) "above" else "below"
+            )
+            val magStr = if (worldField != null) {
+                val mag = kotlin.math.sqrt(worldField[0]*worldField[0] + worldField[1]*worldField[1] + worldField[2]*worldField[2])
+                "%.0f uT".format(mag)
+            } else "no reading"
+            val status = "Planar | $planeStatus\n" +
+                "Grid cells: ${planarGrid.filledCount} | |B|: $magStr\n" +
+                "Empty neighbors: ${emptyCells.size}"
+            runOnUiThread { statusText.text = status }
         }
     }
 
@@ -199,6 +302,20 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
         val dy = position[1] - last[1]
         val dz = position[2] - last[2]
         return (dx * dx + dy * dy + dz * dz) > 0.0025f // 5cm
+    }
+
+    private fun forceRecompute() {
+        if (isRecomputing) return
+        if (!::fieldLineTracer.isInitialized) return
+        if (sampleStore.sampleCount < 5) return
+        isRecomputing = true
+        lastRecomputeSampleCount = sampleStore.sampleCount
+        lastRecomputeTime = System.currentTimeMillis()
+        recomputeScope.launch {
+            fieldLineTracer.setSubtractAverage(subtractAverage)
+            fieldLineTracer.recomputeLines()
+            isRecomputing = false
+        }
     }
 
     private fun maybeRecomputeFieldLines() {
@@ -218,6 +335,7 @@ class MainActivity : AppCompatActivity(), GLSurfaceView.Renderer {
             lastRecomputeSampleCount = count
             lastRecomputeTime = now
             recomputeScope.launch {
+                fieldLineTracer.setSubtractAverage(subtractAverage)
                 fieldLineTracer.recomputeLines()
                 isRecomputing = false
             }

@@ -22,13 +22,26 @@ class SampleStore {
     var sampleCount = 0
         private set
 
+    // Running sum for computing average field
+    private val fieldSum = floatArrayOf(0f, 0f, 0f)
+
     @Synchronized
     fun addSample(position: FloatArray, field: FloatArray) {
         val index = samples.size
         samples.add(SpatialSample(position.copyOf(), field.copyOf()))
         val cell = positionToCell(position)
         grid.getOrPut(cell) { mutableListOf() }.add(index)
+        fieldSum[0] += field[0]
+        fieldSum[1] += field[1]
+        fieldSum[2] += field[2]
         sampleCount = samples.size
+    }
+
+    @Synchronized
+    fun getAverageField(): FloatArray {
+        if (samples.isEmpty()) return floatArrayOf(0f, 0f, 0f)
+        val n = samples.size.toFloat()
+        return floatArrayOf(fieldSum[0] / n, fieldSum[1] / n, fieldSum[2] / n)
     }
 
     @Synchronized

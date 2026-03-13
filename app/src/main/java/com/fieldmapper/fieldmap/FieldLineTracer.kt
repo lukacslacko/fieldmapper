@@ -22,19 +22,23 @@ class FieldLineTracer(private val store: SampleStore) {
 
     companion object {
         private const val TAG = "FieldMapper"
-        const val STEP_SIZE = 0.02f         // 2cm integration steps
-        const val MAX_STEPS = 400           // max 8m per direction
-        const val SEED_SPACING = 0.3f       // 30cm between seed points
-        const val MIN_LINE_DISTANCE = 0.08f // skip seeds too close to existing lines
+        const val STEP_SIZE = 0.05f         // 5cm integration steps
+        const val MAX_STEPS = 100           // max 5m per direction
+        const val SEED_SPACING = 0.5f       // 50cm between seed points
+        const val MIN_LINE_DISTANCE = 0.15f // skip seeds too close to existing lines
         const val COVERAGE_RADIUS = 0.5f    // radius to check sample density
         const val MIN_DENSITY = 3           // samples needed for "well-sampled"
     }
 
-    private val interpolator = FieldInterpolator(store)
+    val interpolator = FieldInterpolator(store)
     private val linesRef = AtomicReference<List<FieldLine>>(emptyList())
 
     val currentLines: List<FieldLine>
         get() = linesRef.get()
+
+    fun setSubtractAverage(enabled: Boolean) {
+        interpolator.bias = if (enabled) store.getAverageField() else floatArrayOf(0f, 0f, 0f)
+    }
 
     /**
      * Recompute all field lines from scratch. Called on background thread.
@@ -72,7 +76,8 @@ class FieldLineTracer(private val store: SampleStore) {
 
                     // Skip if no field data here
                     val mag = interpolator.magnitude(seed)
-                    if (mag == null || mag < 1f) {
+                    val minMag = if (interpolator.bias[0] != 0f || interpolator.bias[1] != 0f || interpolator.bias[2] != 0f) 0.05f else 1f
+                    if (mag == null || mag < minMag) {
                         z += SEED_SPACING; continue
                     }
 
@@ -114,6 +119,7 @@ class FieldLineTracer(private val store: SampleStore) {
         val p = start.copyOf()
         val dir = direction.toFloat()
 
+        var lastConfidence = 1f
         for (step in 0 until MAX_STEPS) {
             // RK4 integration
             val k1 = interpolator.interpolateNormalized(p) ?: break
@@ -140,13 +146,16 @@ class FieldLineTracer(private val store: SampleStore) {
             p[1] += dir * STEP_SIZE / 6f * (k1[1] + 2f * k2[1] + 2f * k3[1] + k4[1])
             p[2] += dir * STEP_SIZE / 6f * (k1[2] + 2f * k2[2] + 2f * k3[2] + k4[2])
 
-            val density = store.countSamplesNear(p, COVERAGE_RADIUS)
-            val confidence = (density.toFloat() / MIN_DENSITY).coerceIn(0f, 1f)
+            // Only check density every 5 steps to save computation
+            if (step % 5 == 0) {
+                val density = store.countSamplesNear(p, COVERAGE_RADIUS)
+                lastConfidence = (density.toFloat() / MIN_DENSITY).coerceIn(0f, 1f)
+            }
 
             val mag = interpolator.magnitude(p) ?: 0f
             val normStrength = (mag / avgMag).coerceIn(0f, 1f)
 
-            result.add(TracePoint(p.copyOf(), confidence, normStrength))
+            result.add(TracePoint(p.copyOf(), lastConfidence, normStrength))
         }
 
         return result

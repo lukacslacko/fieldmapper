@@ -15,6 +15,9 @@ class FieldInterpolator(private val store: SampleStore) {
         const val MIN_SAMPLES = 2         // need at least this many nearby samples
     }
 
+    /** Bias to subtract from the interpolated field (e.g. average Earth field). */
+    var bias: FloatArray = floatArrayOf(0f, 0f, 0f)
+
     /**
      * Interpolate the magnetic field at the given position.
      * Returns null if the position is too far from any samples.
@@ -35,7 +38,11 @@ class FieldInterpolator(private val store: SampleStore) {
             wSum += w
         }
 
-        return floatArrayOf(wx / wSum, wy / wSum, wz / wSum)
+        return floatArrayOf(
+            wx / wSum - bias[0],
+            wy / wSum - bias[1],
+            wz / wSum - bias[2]
+        )
     }
 
     /**
@@ -44,7 +51,9 @@ class FieldInterpolator(private val store: SampleStore) {
     fun interpolateNormalized(position: FloatArray): FloatArray? {
         val b = interpolate(position) ?: return null
         val mag = sqrt(b[0] * b[0] + b[1] * b[1] + b[2] * b[2])
-        if (mag < 0.1f) return null
+        // Lower threshold when bias-subtracting, since local deviations can be small
+        val minMag = if (bias[0] != 0f || bias[1] != 0f || bias[2] != 0f) 0.01f else 0.1f
+        if (mag < minMag) return null
         return floatArrayOf(b[0] / mag, b[1] / mag, b[2] / mag)
     }
 
