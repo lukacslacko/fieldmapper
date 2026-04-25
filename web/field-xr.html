@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Field Mapper — AR</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <link rel="stylesheet" href="styles.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.module.js"
+    }
+  }
+  </script>
+</head>
+<body class="ar-body">
+  <!-- DOM overlay shown over the immersive canvas. -->
+  <div id="xrOverlay" class="xr-overlay">
+    <button id="backBtn" class="ar-btn" aria-label="Back">←</button>
+
+    <div id="status" class="ar-status">
+      <span class="dot"></span>
+      <span id="statusText">Initialising…</span>
+    </div>
+
+    <div class="hud-panel hud-tl">
+      <div class="hud-row"><span class="lbl">Samples</span><span id="sampleCount" class="val">0</span></div>
+      <div class="hud-row"><span class="lbl">Lines</span><span id="lineCount" class="val">0</span></div>
+      <div class="hud-row"><span class="lbl">|B|</span><span id="bMag" class="val">— µT</span></div>
+      <div class="hud-row"><span class="lbl">Avg</span><span id="bAvg" class="val">— µT</span></div>
+      <div class="hud-row"><span class="lbl">Gen</span><span id="genCount" class="val">0</span></div>
+    </div>
+
+    <div class="hud-panel hud-br">
+      <label class="hud-toggle">
+        <input id="biasToggle" type="checkbox">
+        <span>Subtract Earth field</span>
+      </label>
+      <label class="hud-toggle">
+        <input id="dotsToggle" type="checkbox" checked>
+        <span>Show sample dots</span>
+      </label>
+      <label class="hud-toggle">
+        <input id="targetsToggle" type="checkbox" checked>
+        <span>Show "go here" markers</span>
+      </label>
+      <button id="resetSession" class="ar-btn-text">Reset map</button>
+    </div>
+
+    <div id="hint" class="xr-hint">Walk slowly around the room. Cover space at different heights.</div>
+  </div>
+
+  <!-- Pre-session gate -->
+  <div id="startGate" class="start-gate">
+    <div class="gate-box">
+      <h2>Field Mapper — AR</h2>
+      <p class="gate-sub">
+        Immersive AR via <b>WebXR + ARCore</b>. Field readings come from the
+        phone's <b>magnetometer</b>. Heavy reconstruction runs on the server,
+        so the phone only collects + renders.
+      </p>
+      <button id="startBtn" class="primary large">Start AR</button>
+      <button id="gateBack" class="secondary">Back</button>
+
+      <div id="gateError" class="gate-error" hidden>
+        <h3 id="gateErrorTitle">Can't start</h3>
+        <p id="gateErrorBody"></p>
+        <button id="gateRetry" class="primary">Retry</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="field-xr.js"></script>
+</body>
+</html>

@@ -11,3 +11,7 @@ local.properties
 # APK files
 *.apk
 *.aab
+
+# Python
+__pycache__/
+*.pyc
