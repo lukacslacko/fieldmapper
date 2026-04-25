@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Field Mapper — WebXR</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0e14">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="home-body">
+  <main class="home-main">
+    <h1>Field Mapper</h1>
+    <p class="lede">
+      Walk around a room with your phone — it samples the magnetic field
+      every few centimetres, sends the readings to the server, and the
+      server reconstructs the field as a tangle of glowing lines that
+      stay anchored in 3D space.
+    </p>
+
+    <div class="card">
+      <h2>WebXR mode <span class="badge">Android Chrome</span></h2>
+      <p>
+        Uses ARCore via WebXR for 6 DoF tracking + the phone's magnetometer
+        for the field. Field-line reconstruction runs on the server, so the
+        phone only has to render and collect data.
+      </p>
+      <ul class="reqs">
+        <li><b>Android Chrome</b> with ARCore installed</li>
+        <li>Permission for <b>camera</b>, <b>motion sensors</b>, and <b>magnetometer</b></li>
+        <li>Open this page over <b>HTTPS</b> (or <code>http://localhost</code> on the dev machine)</li>
+      </ul>
+      <a id="startLink" class="primary large" href="field-xr.html">Start AR</a>
+      <p id="xrSupportNote" class="support-note"></p>
+    </div>
+
+    <div class="card subtle">
+      <h2>Server</h2>
+      <p>
+        Heavy work — IDW interpolation + RK4 field-line tracing — runs in
+        a Python process at the same origin as this page. Each session
+        uploads samples in batches and polls back for the latest
+        reconstruction.
+      </p>
+      <p class="muted">Session ID: <code id="sessionId">—</code></p>
+      <button id="resetBtn" class="secondary">Reset session</button>
+    </div>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

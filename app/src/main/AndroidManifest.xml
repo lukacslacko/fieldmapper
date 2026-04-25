@@ -2,6 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
     <uses-feature android:name="android.hardware.camera.ar" android:required="true" />
     <uses-feature android:name="android.hardware.sensor.compass" android:required="true" />
@@ -9,7 +11,8 @@
     <application
         android:allowBackup="false"
         android:label="FieldMapper"
-        android:theme="@style/Theme.FieldMapper">
+        android:theme="@style/Theme.FieldMapper"
+        android:usesCleartextTraffic="true">
 
         <meta-data android:name="com.google.ar.core" android:value="required" />
 
