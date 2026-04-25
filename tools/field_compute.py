@@ -3,15 +3,18 @@ Magnetic field reconstruction from sparse spatial samples.
 
 The math here mirrors the Android app's `fieldmap/` package (sample storage,
 inverse-distance-weighted interpolation, RK4 field-line tracing) ported to
-pure Python so the WebXR client can offload the heavy work to the server.
+the server side so the phone can offload the heavy work.
 
 Everything lives in two units:
-  * `SampleStore`  — append-only spatial store with a 20 cm hash grid
+  * `SampleStore`  — append-only spatial store with a hash grid
   * `FieldComputer` — IDW interpolator + RK4 tracer + frontier-suggestion engine
 
-There is no NumPy dependency: the inner loops touch only a handful of
-neighbouring cells per query, so plain Python lists are fast enough at the
-~5 k–20 k sample scale a single mapping session generates.
+NumPy does the per-cache-cell IDW vectorised across the candidate samples
+that fall inside each cell's search radius, then the result is flattened to
+a nested Python list so the RK4 inner loop reads Python floats (NumPy
+scalar arithmetic is too slow inside a tight per-step loop). The precompute
+pays for the trilinear-cache step that used to dominate, and the line tracer
+becomes essentially constant-cost per step.
 """
 from __future__ import annotations
 
@@ -20,6 +23,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
+
+import numpy as np
 
 
 # ---------------------------------------------------------------------------
@@ -203,50 +208,54 @@ class FieldComputer:
 
     `bias` controls whether the interpolated field has the global average
     subtracted (mirrors the Android app's "Subtract Earth field" toggle).
+
+    The IDW is the hot loop: it runs once per cache cell visited by a
+    trace (lazy 10 cm cache, ~5 k cells per session). We keep the cache
+    layout from the pure-Python version but vectorise the per-cell IDW
+    with NumPy — for high-density data (lots of samples per IDW), this is
+    a clear win; for sparse data the per-call overhead dampens the gain
+    but we still come out ahead, because most of the time goes into the
+    cells where the candidate set is biggest.
     """
+
+    # Below this many candidates per IDW, the pure-Python loop wins
+    # (NumPy's per-call setup overhead dominates the small-vector math).
+    NUMPY_THRESHOLD = 24
 
     def __init__(self, snap: SampleSnapshot, bias: str = "none") -> None:
         self.snap = snap
         self.bias = bias
         avg = snap.average_field()
-        self._bias_vec: tuple[float, float, float]
+        self._bias_vec_t: tuple[float, float, float]
         if bias == "earth":
-            self._bias_vec = avg
+            self._bias_vec_t = avg
         else:
-            self._bias_vec = (0.0, 0.0, 0.0)
+            self._bias_vec_t = (0.0, 0.0, 0.0)
+
+        # Sample positions / fields as NumPy arrays once. Cheap relative to
+        # the rest of the pipeline, and lets the per-cell IDW be pure
+        # vector ops when the candidate set is large enough to benefit.
+        n = len(snap.samples)
+        if n > 0:
+            pos = np.empty((n, 3), dtype=np.float32)
+            fld = np.empty((n, 3), dtype=np.float32)
+            for i, s in enumerate(snap.samples):
+                pos[i, 0] = s.p[0]; pos[i, 1] = s.p[1]; pos[i, 2] = s.p[2]
+                fld[i, 0] = s.b[0]; fld[i, 1] = s.b[1]; fld[i, 2] = s.b[2]
+            self._sample_pos = pos
+            self._sample_field = fld
+        else:
+            self._sample_pos = np.zeros((0, 3), dtype=np.float32)
+            self._sample_field = np.zeros((0, 3), dtype=np.float32)
+
         # Lazy cache of interpolated field at grid points, keyed by integer
-        # (ix, iy, iz). Populated on first access from `_grid_at`. Storing
-        # `None` for "no data here" too, so we don't repeatedly re-query.
+        # (ix, iy, iz). Stores `None` for "no data here" too, so we don't
+        # repeatedly re-query empty regions during tracing.
         self._grid_cache: dict[tuple[int, int, int], Optional[tuple[float, float, float]]] = {}
 
-    # ------- IDW interpolation ----------------------------------------------
-
-    def _samples_near(self, p: tuple[float, float, float], r: float) -> list[Sample]:
-        cr = int(r / SAMPLE_CELL) + 1
-        cx = math.floor(p[0] / SAMPLE_CELL)
-        cy = math.floor(p[1] / SAMPLE_CELL)
-        cz = math.floor(p[2] / SAMPLE_CELL)
-        r2 = r * r
-        out: list[Sample] = []
-        grid = self.snap.grid
-        samples = self.snap.samples
-        for dx in range(-cr, cr + 1):
-            for dy in range(-cr, cr + 1):
-                for dz in range(-cr, cr + 1):
-                    bucket = grid.get((cx + dx, cy + dy, cz + dz))
-                    if not bucket:
-                        continue
-                    for idx in bucket:
-                        s = samples[idx]
-                        ddx = s.p[0] - p[0]
-                        ddy = s.p[1] - p[1]
-                        ddz = s.p[2] - p[2]
-                        if ddx * ddx + ddy * ddy + ddz * ddz <= r2:
-                            out.append(s)
-        return out
+    # ------- _count_near (used by trace confidence + seed scoring) ----------
 
     def _count_near(self, p: tuple[float, float, float], r: float) -> int:
-        # Like _samples_near but doesn't materialise the list.
         cr = int(r / SAMPLE_CELL) + 1
         cx = math.floor(p[0] / SAMPLE_CELL)
         cy = math.floor(p[1] / SAMPLE_CELL)
@@ -270,26 +279,6 @@ class FieldComputer:
                             n += 1
         return n
 
-    def interpolate(self, p: tuple[float, float, float]) -> Optional[tuple[float, float, float]]:
-        nearby = self._samples_near(p, INTERP_RADIUS)
-        if len(nearby) < INTERP_MIN_NEAR:
-            return None
-        wx = wy = wz = wsum = 0.0
-        for s in nearby:
-            ddx = p[0] - s.p[0]
-            ddy = p[1] - s.p[1]
-            ddz = p[2] - s.p[2]
-            d = math.sqrt(ddx * ddx + ddy * ddy + ddz * ddz)
-            if d < INTERP_EPSILON:
-                d = INTERP_EPSILON
-            w = 1.0 / (d * d)
-            wx += w * s.b[0]
-            wy += w * s.b[1]
-            wz += w * s.b[2]
-            wsum += w
-        bx, by, bz = self._bias_vec
-        return (wx / wsum - bx, wy / wsum - by, wz / wsum - bz)
-
     def normalised(self, p: tuple[float, float, float]) -> Optional[tuple[float, float, float]]:
         b = self._trilinear(p)
         if b is None:
@@ -307,6 +296,83 @@ class FieldComputer:
         if b is None:
             return None
         return math.sqrt(b[0] * b[0] + b[1] * b[1] + b[2] * b[2])
+
+    # ------- IDW interpolation (NumPy at high candidate count) --------------
+
+    def _gather_candidates(self, p: tuple[float, float, float]) -> list[int]:
+        """Collect sample indices in the bucket-grid neighbourhood of `p`.
+
+        Includes a margin of one bucket so we don't miss samples that sit at
+        the far edge of an otherwise-out-of-range bucket.
+        """
+        cr = int(INTERP_RADIUS / SAMPLE_CELL) + 1
+        cx = math.floor(p[0] / SAMPLE_CELL)
+        cy = math.floor(p[1] / SAMPLE_CELL)
+        cz = math.floor(p[2] / SAMPLE_CELL)
+        out: list[int] = []
+        grid = self.snap.grid
+        for dx in range(-cr, cr + 1):
+            for dy in range(-cr, cr + 1):
+                for dz in range(-cr, cr + 1):
+                    bucket = grid.get((cx + dx, cy + dy, cz + dz))
+                    if bucket:
+                        out.extend(bucket)
+        return out
+
+    def interpolate(self, p: tuple[float, float, float]) -> Optional[tuple[float, float, float]]:
+        candidates = self._gather_candidates(p)
+        n = len(candidates)
+        if n < INTERP_MIN_NEAR:
+            return None
+        if n < self.NUMPY_THRESHOLD:
+            return self._interpolate_python(p, candidates)
+        return self._interpolate_numpy(p, candidates)
+
+    def _interpolate_python(self, p: tuple[float, float, float],
+                            candidates: list[int]) -> Optional[tuple[float, float, float]]:
+        # Hand-tuned: read sample tuples from snap.samples directly so we
+        # avoid numpy scalar overhead in the inner loop.
+        samples = self.snap.samples
+        r2 = INTERP_RADIUS * INTERP_RADIUS
+        wx = wy = wz = wsum = 0.0
+        used = 0
+        px, py, pz = p
+        for idx in candidates:
+            s = samples[idx]
+            sp = s.p
+            ddx = sp[0] - px; ddy = sp[1] - py; ddz = sp[2] - pz
+            d2 = ddx * ddx + ddy * ddy + ddz * ddz
+            if d2 > r2: continue
+            d = math.sqrt(d2)
+            if d < INTERP_EPSILON: d = INTERP_EPSILON
+            w = 1.0 / (d * d)
+            sb = s.b
+            wx += w * sb[0]; wy += w * sb[1]; wz += w * sb[2]
+            wsum += w
+            used += 1
+        if used < INTERP_MIN_NEAR:
+            return None
+        bx, by, bz = self._bias_vec_t
+        return (wx / wsum - bx, wy / wsum - by, wz / wsum - bz)
+
+    def _interpolate_numpy(self, p: tuple[float, float, float],
+                           candidates: list[int]) -> Optional[tuple[float, float, float]]:
+        idxs = np.fromiter(candidates, dtype=np.intp, count=len(candidates))
+        pos = self._sample_pos[idxs]
+        center = np.array(p, dtype=np.float32)
+        diff = pos - center
+        d2 = (diff * diff).sum(axis=1)
+        mask = d2 <= (INTERP_RADIUS * INTERP_RADIUS)
+        if int(mask.sum()) < INTERP_MIN_NEAR:
+            return None
+        d2 = d2[mask]
+        fld = self._sample_field[idxs[mask]]
+        d = np.sqrt(d2)
+        np.maximum(d, INTERP_EPSILON, out=d)
+        w = 1.0 / (d * d)
+        val = (fld * w[:, None]).sum(axis=0) / w.sum()
+        bx, by, bz = self._bias_vec_t
+        return (float(val[0]) - bx, float(val[1]) - by, float(val[2]) - bz)
 
     # ------- Lazy trilinear cache (the speed-critical inner loop) ----------
 
