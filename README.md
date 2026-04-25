@@ -47,12 +47,15 @@ This is the path that gets the smoothest dev loop.
 
 ### 1. Start the server
 
-Stdlib only — no `pip install` needed.
-
 ```bash
-python3 tools/serve.py                # HTTP on :8080
-python3 tools/serve.py --port 9000    # custom port
+pip install -r tools/requirements.txt   # NumPy; one-time
+python3 tools/serve.py                  # HTTP on :8080
+python3 tools/serve.py --port 9000      # custom port
 ```
+
+The only third-party dep is **NumPy** (used to vectorise the per-call IDW
+when the candidate set is large enough to benefit). Everything else is
+Python stdlib.
 
 On startup the server prints something like:
 
@@ -276,18 +279,24 @@ on a valid session ID format.
 
 ### Performance
 
-Single-threaded Python compute time scales roughly linearly with sample
-count. Rough numbers on an Apple M-series CPU:
+Single-threaded Python with NumPy-vectorised IDW for high-density cells.
+Rough numbers on an Apple M-series CPU:
 
 | Samples | compute time |
 |---|---|
-| 800 | ~ 0.5 s |
-| 3 000 | ~ 1.2 s |
-| 10 000 | ~ 4 s |
+| 800 | ~ 0.6 s |
+| 3 000 | ~ 0.9 s |
+| 10 000 | ~ 1.6 s |
 
-Past ~10 k samples the compute interval starts to lag the 2 s poll
-cadence — at that point either reset, raise `SEED_SPACING` in
-`tools/field_compute.py`, or rewrite the inner loop in NumPy.
+The IDW switches between a hand-tuned Python inner loop (low candidate
+counts, where NumPy's per-call setup overhead would dominate) and a
+NumPy-vectorised path (above ~24 candidates per IDW). The crossover
+point is in `FieldComputer.NUMPY_THRESHOLD` if you want to tune it.
+
+Past ~30 k samples the compute interval starts to lag the 2 s poll
+cadence — at that point either reset, raise `SEED_SPACING` /
+`COVERAGE_RADIUS` in `tools/field_compute.py`, or rewrite the line
+tracer to advance many lines in parallel as a single batched op.
 
 ---
 
